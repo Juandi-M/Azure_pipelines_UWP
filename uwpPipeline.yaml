@@ -1,0 +1,221 @@
+# Universal Windows Platform
+
+# CI Triggerin and Batching pipeline
+
+trigger:
+
+batch: true
+
+branches:
+
+include:
+
+- Production
+
+pr: none
+
+name: $(MajorVersion).$(MinorVersion).$(date:yy)$(DayOfYear)$(rev:.r)
+
+pool:
+
+vmImage: 'windows-latest'
+
+variables:
+
+- group: RSAM_Pipeline
+
+- name: solution
+
+value: '**/*.sln'
+
+- name: buildPlatform
+
+value: 'x86|x64'
+
+- name: buildConfiguration
+
+value: 'Release'
+
+- name: appxPackageDir
+
+value: '$(build.artifactStagingDirectory)\AppxPackages\\'
+
+- name: MajorVersion
+
+value: 1
+
+- name: MinorVersion
+
+value: 0
+
+- name: customBuildNumber
+
+value: '$(MajorVersion).$(MinorVersion).$(date:yy)$(DayOfYear)$(rev:.r)'
+
+ 
+
+#Secuential Job executed by tasks.
+
+steps:
+
+#Invoke nugget installer
+
+- task: NuGetToolInstaller@1
+
+#Nugget installer
+
+- task: NuGetCommand@2
+
+inputs:
+
+restoreSolution: '$(solution)'
+
+#INvoke secured self signed pfx
+
+- task: DownloadSecureFile@1
+
+name: mySecureFile
+
+displayName: 'Download CA certificate'
+
+inputs:
+
+secureFile: '$(signingCert.secureFilePath)'
+
+#powershell script for installing the pfx on the installer package (appx)
+
+- task: PowerShell@2
+
+inputs:
+
+targetType: 'inline'
+
+script: |
+
+Write-Host "Start adding the PFX file to the certificate store."
+
+$pfxpath = '$(mySecureFile.secureFilePath)'
+
+$password = '$(signingCert.password)'
+
+Add-Type -AssemblyName System.Security
+
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+
+$cert.Import($pfxpath, $password, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]"PersistKeySet")
+
+$store = new-object system.security.cryptography.X509Certificates.X509Store -argumentlist "MY", CurrentUser
+
+$store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]"ReadWrite")
+
+$store.Add($cert)
+
+$store.Close()
+
+#Pending Approval Request - CHAD
+
+- task: VersionAPPX@2
+
+inputs:
+
+Path: '$(Build.SourcesDirectory)'
+
+VersionNumber: '$(Build.BuildNumber)'
+
+InjectVersion: False
+
+VersionRegex: '(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(\.(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])){3}'
+
+OutputVersion: 'OutputedVersion'
+
+#Build and generate APPX file - APPX with self signed certificate
+
+- task: VSBuild@1
+
+inputs:
+
+platform: 'x86'
+
+solution: '$(solution)'
+
+configuration: '$(buildConfiguration)'
+
+msbuildArgs: '/p:AppxBundlePlatforms="$(buildPlatform)"
+
+/p:AppxPackageDir="$(appxPackageDir)"
+
+/p:AppxBundle=Always
+
+/p:UapAppxPackageBuildMode=StoreUpload
+
+/p:AppxPackageSigningEnabled=true
+
+/p:PackageCertificateThumbprint="$(signingCert.thumbprint)"
+
+/p:PackageCertificateKeyFile="$(mySecureFile.secureFilePath)"
+
+/p:PackageCertificatePassword="$(signingCert.password)"'
+
+#copy artifacts to temp internal Placeholder
+
+- task: CopyFiles@2
+
+displayName: 'Copy Files to: $(build.artifactstagingdirectory)'
+
+inputs:
+
+SourceFolder: '$(system.defaultworkingdirectory)'
+
+Contents: '**\bin\$(BuildConfiguration)\**'
+
+TargetFolder: '$(build.artifactstagingdirectory)'
+
+# publish artifacts to another temp internal Placeholder
+
+- task: PublishBuildArtifacts@1
+
+displayName: 'Publish Artifact: drop'
+
+inputs:
+
+PathtoPublish: '$(build.artifactstagingdirectory)'
+
+# Generate archive bundle with installer (appx) and its dependencies.
+
+# Workaround for: “Ask the app developer for a new app package. This one isn’t signed with a trusted certificate (0x800B0100)”
+
+- task: ArchiveFiles@2
+
+inputs:
+
+rootFolderOrFile: '$(build.artifactstagingdirectory)'
+
+includeRootFolder: true
+
+archiveType: 'zip'
+
+archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+
+replaceExistingArchive: true
+
+#AppCenter Connection and publish!
+
+- task: AppCenterDistribute@3
+
+inputs:
+
+serverEndpoint: '3M_AppCenter_RSAM_UWP_Production'
+
+appSlug: '$(appSlug_prod)'
+
+appFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+
+buildVersion: '$(Build.BuildNumber)'
+
+releaseNotesOption: 'input'
+
+releaseNotesInput: 'New release!'
+
+destinationType: 'groups'
+
+distributionGroupId: '$(distGroup_Prod_CoE), $(distGroup_Prod_UAT)'
